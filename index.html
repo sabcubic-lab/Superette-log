@@ -276,6 +276,21 @@ async function checkIn(){
     render();
   }
 }
+async function checkOut(){
+  if(!unlockedEmployee) return;
+  const rec = attendance.find(a=>a.employee===unlockedEmployee && a.date===todayStr());
+  if(!rec || rec.checkOutTs) return;
+  if(!confirm('متأكد راك خرجت من المحل؟')) return;
+  const btn = document.getElementById('checkoutBtn');
+  if(btn){ btn.disabled=true; btn.textContent='...كايسجل'; }
+  try{
+    await db.collection('attendance').doc(rec.id).update({ checkOutTs: new Date().toISOString() });
+    render();
+  }catch(err){
+    console.error(err); alert('ماقدرش يسجل الخروج، تأكد من الإنترنت وعاود.');
+    render();
+  }
+}
 async function submitEntry(){
   const amt = parseFloat(amount);
   if(!unlockedEmployee || !amt || amt<=0) return;
@@ -294,12 +309,6 @@ async function submitEntry(){
     console.error(err); alert('ماقدرش يسجل، تأكد من الإنترنت وعاود.');
     render();
   }
-}
-async function deleteOwnEntry(id){
-  const entry = logs.find(l=>l.id===id);
-  if(!entry || entry.employee!==unlockedEmployee) return;
-  if(!confirm('تمسح هاذا التسجيل؟')) return;
-  await db.collection('logs').doc(id).delete();
 }
 
 function getEmpLogs(name){
@@ -358,6 +367,34 @@ function getEmpOTDaysList(name){
   return days;
 }
 function fmtHrs(n){ return Number(n).toLocaleString('en-US')+' س'; }
+
+function getEmpAttendance(name){ return attendance.filter(a=>a.employee===name); }
+function hoursBetween(startIso, endIso){
+  if(!startIso || !endIso) return 0;
+  return Math.max(0, (new Date(endIso) - new Date(startIso)) / 3600000);
+}
+// Full daily work report per employee: check-in/out worked hours + overtime hours + total
+function getWorkReport(name){
+  const empAtt = getEmpAttendance(name);
+  const empOT = getEmpOT(name);
+  const dateSet = new Set([...empAtt.map(a=>a.date), ...empOT.map(o=>todayStr(new Date(o.ts)))]);
+  if(dateSet.size===0) return [];
+  const dates = Array.from(dateSet).sort();
+  const start = new Date(dates[0]+'T00:00:00');
+  const today = new Date(todayStr()+'T00:00:00');
+  const days=[];
+  for(let d=new Date(today); d>=start; d.setDate(d.getDate()-1)){
+    const ds = todayStr(d);
+    const att = empAtt.find(a=>a.date===ds);
+    const otEntries = empOT.filter(o=>todayStr(new Date(o.ts))===ds);
+    const otHours = otEntries.reduce((s,o)=>s+Number(o.hours),0);
+    const worked = att ? hoursBetween(att.ts, att.checkOutTs) : 0;
+    const total = worked + otHours;
+    const present = !!att || otEntries.length>0;
+    days.push({date:ds, present, checkIn:att?att.ts:null, checkOut:att&&att.checkOutTs?att.checkOutTs:null, worked, otHours, total});
+  }
+  return days;
+}
 
 // ---- admin flow ----
 async function deleteEntry(id){ await db.collection('logs').doc(id).delete(); }
@@ -462,8 +499,9 @@ function render(){
         ${employees.length===0 ? '<div class="empty">ماكاين حتى خدام</div>' :
           employees.map(e=>{
             const c = attendance.find(a=>a.employee===e.name && a.date===todayStr());
-            return c ? `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">${fmtTime(c.ts)}</span></div>`
-                      : `<div class="summary-row"><span class="name" style="color:var(--danger);">${e.name}</span><span class="count" style="color:var(--ink-soft);">مازال ما وصلش</span></div>`;
+            if(!c) return `<div class="summary-row"><span class="name" style="color:var(--danger);">${e.name}</span><span class="count" style="color:var(--ink-soft);">مازال ما وصلش</span></div>`;
+            if(!c.checkOutTs) return `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">دخل ${fmtTime(c.ts)}</span></div>`;
+            return `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">${fmtTime(c.ts)} ← ${fmtTime(c.checkOutTs)} (${fmtHrs(hoursBetween(c.ts,c.checkOutTs).toFixed(1))})</span></div>`;
           }).join('')}
       </div>
 
@@ -530,6 +568,38 @@ function render(){
             }
           }).join('') + '</div>';
         })() : '<div class="empty">اختار خدام باش تشوف الاستهلاك تاعو يوم بيوم</div>'}
+      </div>
+
+      <div class="card">
+        <h2>تقرير ساعات العمل اليومي</h2>
+        <div class="chips">
+          ${employees.map(e=>`<button class="chip ${detailEmployee===e.name?'active':''}" data-detail="${e.name}">${e.name}</button>`).join('')}
+        </div>
+        ${detailEmployee ? (()=>{
+          const wdays = getWorkReport(detailEmployee);
+          if(wdays.length===0) return '<div class="empty" style="margin-top:10px;">ماكاين حتى تسجيل حضور أو ساعات لـ '+detailEmployee+'</div>';
+          return '<div style="margin-top:12px;">' + wdays.map(day=>{
+            const isToday = day.date===todayStr();
+            if(!day.present){
+              return `<div class="day-row absent">
+                <div>
+                  <div class="day-label">${isToday?'<span class="day-today-badge">اليوم</span>':''}${fmtDateLabel(day.date)}</div>
+                  <div class="day-sub">ما عملش</div>
+                </div>
+                <span class="day-absent-badge">غائب</span>
+              </div>`;
+            }
+            const timesLine = day.checkIn ? `دخل ${fmtTime(day.checkIn)}${day.checkOut?' — خرج '+fmtTime(day.checkOut):' — مازال ما خرجش'}` : 'بلا تسجيل حضور';
+            const breakdownLine = `${fmtHrs(day.worked.toFixed(1))} عادية${day.otHours>0?' + '+fmtHrs(day.otHours)+' إضافية':''}`;
+            return `<div class="day-row present">
+              <div>
+                <div class="day-label">${isToday?'<span class="day-today-badge">اليوم</span>':''}${fmtDateLabel(day.date)}</div>
+                <div class="day-sub">${timesLine}<br>${breakdownLine}</div>
+              </div>
+              <span class="day-amount">${fmtHrs(day.total.toFixed(1))}</span>
+            </div>`;
+          }).join('') + '</div>';
+        })() : '<div class="empty">اختار خدام باش تشوف تقرير الساعات يوم بيوم</div>'}
       </div>
 
       <div class="card">
@@ -643,7 +713,7 @@ function render(){
       return daysList.map(day=>{
         const isToday = day.date===todayStr();
         if(day.present){
-          const detailLines = day.entries.map(l=>`${fmtTime(l.ts)} — ${l.note||'بلا ملاحظة'} — <b>${fmtDA(l.amount)}</b> <button class="del" data-delown="${l.id}" style="font-size:11px;padding:2px 6px;">حذف</button>`).join('<br>');
+          const detailLines = day.entries.map(l=>`${fmtTime(l.ts)} — ${l.note||'بلا ملاحظة'} — <b>${fmtDA(l.amount)}</b>`).join('<br>');
           return `<div class="day-row present">
             <div>
               <div class="day-label">${isToday?'<span class="day-today-badge">اليوم</span>':''}${fmtDateLabel(day.date)}</div>
@@ -676,11 +746,16 @@ function render(){
       </div>`:''}
 
       <div class="card" style="text-align:center;">
-        ${todayCheckin ? `
-          <div style="font-size:28px;margin-bottom:4px;">✅</div>
-          <div style="font-weight:900;color:var(--green-dark);font-size:15px;">وصلت اليوم فـ ${fmtTime(todayCheckin.ts)}</div>
-        ` : `
+        ${!todayCheckin ? `
           <button class="submit-btn" id="checkinBtn" style="background:var(--green);color:#fff;">📍 وصلت للمحل</button>
+        ` : !todayCheckin.checkOutTs ? `
+          <div style="font-size:28px;margin-bottom:4px;">✅</div>
+          <div style="font-weight:900;color:var(--green-dark);font-size:15px;margin-bottom:12px;">وصلت اليوم فـ ${fmtTime(todayCheckin.ts)}</div>
+          <button class="submit-btn" id="checkoutBtn" style="background:var(--danger);color:#fff;">🚪 خرجت من المحل</button>
+        ` : `
+          <div style="font-size:28px;margin-bottom:4px;">✅</div>
+          <div style="font-weight:900;color:var(--green-dark);font-size:15px;">وصلت فـ ${fmtTime(todayCheckin.ts)} — خرجت فـ ${fmtTime(todayCheckin.checkOutTs)}</div>
+          <div style="color:var(--green);font-weight:700;margin-top:4px;">خدمت اليوم: ${fmtHrs(hoursBetween(todayCheckin.ts, todayCheckin.checkOutTs).toFixed(1))}</div>
         `}
       </div>
 
@@ -701,7 +776,7 @@ function render(){
           todayDay.entries.map(l=>`
             <div class="entry">
               <div><div class="what">${l.note||'بلا ملاحظة'}</div></div>
-              <div class="meta"><span class="amount">${fmtDA(l.amount)}</span><span class="time">${fmtTime(l.ts)}</span><button class="del" data-delown="${l.id}">حذف</button></div>
+              <div class="meta"><span class="amount">${fmtDA(l.amount)}</span><span class="time">${fmtTime(l.ts)}</span></div>
             </div>`).join('')}
       </div>
 
@@ -751,11 +826,12 @@ function render(){
     document.getElementById('lockBtn').addEventListener('click', lockOut);
     const checkinBtn = document.getElementById('checkinBtn');
     if(checkinBtn) checkinBtn.addEventListener('click', checkIn);
+    const checkoutBtn = document.getElementById('checkoutBtn');
+    if(checkoutBtn) checkoutBtn.addEventListener('click', checkOut);
     const amtEl = document.getElementById('amountInput');
     amtEl.addEventListener('input', e=>{ amount=e.target.value; const b=document.getElementById('submitBtn'); if(b) b.disabled = (!amount || Number(amount)<=0); });
     document.getElementById('noteInput').addEventListener('input', e=>{ note=e.target.value; });
     document.getElementById('submitBtn').addEventListener('click', submitEntry);
-    document.querySelectorAll('[data-delown]').forEach(el=>el.addEventListener('click', ()=>deleteOwnEntry(el.dataset.delown)));
     const otHoursEl = document.getElementById('otHoursInput');
     otHoursEl.addEventListener('input', e=>{ otHours=e.target.value; const b=document.getElementById('otSubmitBtn'); if(b) b.disabled = (!otHours || Number(otHours)<=0); });
     document.getElementById('otNoteInput').addEventListener('input', e=>{ otNote=e.target.value; });
