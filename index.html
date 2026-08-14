@@ -126,9 +126,11 @@ const db = firebase.firestore();
 
 let employees=[]; // {name, pin}  (mirrored live from Firestore)
 let logs=[];       // mirrored live from Firestore
+let attendance=[]; // {id, employee, ts, date}  mirrored live from Firestore
+let overtime=[];   // {id, employee, hours, note, ts, date} mirrored live from Firestore
 let adminPin=null; // mirrored live from Firestore
 
-let empReady=false, logsReady=false, pinReady=false;
+let empReady=false, logsReady=false, pinReady=false, attReady=false, otReady=false;
 
 // entry-mode sub state
 let entryStage='select'; // select | pin | panel
@@ -138,6 +140,7 @@ let empPinError='';
 let unlockedEmployee=null;
 let empPanelTab='today';
 let amount=''; let note=''; let showConfirm=false;
+let otHours=''; let otNote=''; let showOTConfirm=false;
 
 // admin state
 let mode='entry'; // entry | pin | admin | setpin
@@ -154,7 +157,7 @@ function fmtDA(n){ return Number(n).toLocaleString('en-US')+' دج'; }
 function genPin(){ return String(Math.floor(1000+Math.random()*9000)); }
 
 function checkAllReady(){
-  if(empReady && logsReady && pinReady){ ready=true; }
+  if(empReady && logsReady && pinReady && attReady && otReady){ ready=true; }
   render();
 }
 
@@ -167,6 +170,16 @@ function loadData(){
   db.collection('logs').onSnapshot(snap=>{
     logs = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=> new Date(b.ts)-new Date(a.ts));
     logsReady = true; checkAllReady();
+  }, err=>{ console.error(err); });
+
+  db.collection('attendance').onSnapshot(snap=>{
+    attendance = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=> new Date(b.ts)-new Date(a.ts));
+    attReady = true; checkAllReady();
+  }, err=>{ console.error(err); });
+
+  db.collection('overtime').onSnapshot(snap=>{
+    overtime = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=> new Date(b.ts)-new Date(a.ts));
+    otReady = true; checkAllReady();
   }, err=>{ console.error(err); });
 
   db.collection('meta').doc('admin').onSnapshot(docSnap=>{
@@ -223,6 +236,43 @@ function empPinBackspace(){ empPinInput = empPinInput.slice(0,-1); render(); }
 function backToSelect(){ entryStage='select'; pendingEmployee=null; empPinInput=''; empPinError=''; render(); }
 function lockOut(){ unlockedEmployee=null; entryStage='select'; amount=''; note=''; render(); }
 
+async function submitOvertime(){
+  const hrs = parseFloat(otHours);
+  if(!unlockedEmployee || !hrs || hrs<=0) return;
+  const otData = { employee:unlockedEmployee, hours:hrs, note:(otNote||'').trim(), ts:new Date().toISOString(), date: todayStr() };
+  const btn = document.getElementById('otSubmitBtn');
+  if(btn){ btn.disabled=true; btn.textContent='...كايسجل'; }
+  try{
+    await db.collection('overtime').add(otData);
+    otHours=''; otNote=''; showOTConfirm={hours:otData.hours, note:otData.note};
+    if(document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    render();
+    setTimeout(()=>{ showOTConfirm=false; render(); }, 2200);
+  }catch(err){
+    console.error(err); alert('ماقدرش يسجل، تأكد من الإنترنت وعاود.');
+    render();
+  }
+}
+async function deleteOwnOvertime(id){
+  const entry = overtime.find(o=>o.id===id);
+  if(!entry || entry.employee!==unlockedEmployee) return;
+  if(!confirm('تمسح هاذا التسجيل؟')) return;
+  await db.collection('overtime').doc(id).delete();
+}
+async function deleteOvertime(id){ await db.collection('overtime').doc(id).delete(); }
+
+async function checkIn(){
+  if(!unlockedEmployee) return;
+  const btn = document.getElementById('checkinBtn');
+  if(btn){ btn.disabled=true; btn.textContent='...كايسجل'; }
+  try{
+    await db.collection('attendance').add({ employee:unlockedEmployee, ts:new Date().toISOString(), date: todayStr() });
+    render();
+  }catch(err){
+    console.error(err); alert('ماقدرش يسجل الحضور، تأكد من الإنترنت وعاود.');
+    render();
+  }
+}
 async function submitEntry(){
   const amt = parseFloat(amount);
   if(!unlockedEmployee || !amt || amt<=0) return;
@@ -279,6 +329,33 @@ function getEmpDaysList(name){
   return days;
 }
 
+function getEmpOT(name){
+  return overtime.filter(o=>o.employee===name);
+}
+function getEmpOTDaysList(name){
+  const empOT = overtime.filter(o=>o.employee===name);
+  if(empOT.length===0) return [];
+  const map={};
+  empOT.forEach(o=>{
+    const d = todayStr(new Date(o.ts));
+    if(!map[d]) map[d]=[];
+    map[d].push(o);
+  });
+  const dates = Object.keys(map).sort();
+  const start = new Date(dates[0]+'T00:00:00');
+  const today = new Date(todayStr()+'T00:00:00');
+  const days=[];
+  for(let d=new Date(today); d>=start; d.setDate(d.getDate()-1)){
+    const ds = todayStr(d);
+    const entries = map[ds]||[];
+    const present = entries.length>0;
+    const total = entries.reduce((s,o)=>s+Number(o.hours),0);
+    days.push({date:ds, present, total, count:entries.length, entries});
+  }
+  return days;
+}
+function fmtHrs(n){ return Number(n).toLocaleString('en-US')+' س'; }
+
 // ---- admin flow ----
 async function deleteEntry(id){ await db.collection('logs').doc(id).delete(); }
 function getFilteredLogs(){
@@ -287,6 +364,14 @@ function getFilteredLogs(){
 }
 function getSummary(list){
   const map={}; list.forEach(l=>{ map[l.employee]=(map[l.employee]||0)+Number(l.amount); });
+  return Object.entries(map).sort((a,b)=>b[1]-a[1]);
+}
+function getFilteredOT(){
+  if(adminTab==='today'){ const t=todayStr(); return overtime.filter(o=>todayStr(new Date(o.ts))===t); }
+  return overtime;
+}
+function getOTSummary(list){
+  const map={}; list.forEach(o=>{ map[o.employee]=(map[o.employee]||0)+Number(o.hours); });
   return Object.entries(map).sort((a,b)=>b[1]-a[1]);
 }
 function getDailyBreakdown(name){
@@ -359,12 +444,26 @@ function render(){
     const filtered = getFilteredLogs();
     const summary = getSummary(filtered);
     const total = filtered.reduce((s,l)=>s+Number(l.amount),0);
+    const filteredOT = getFilteredOT();
+    const otSummary = getOTSummary(filteredOT);
+    const totalOT = filteredOT.reduce((s,o)=>s+Number(o.hours),0);
     app.innerHTML = `
       <div class="top">
         <div><h1>واجهة المدير</h1><div class="sub">${fmtDateLabel(todayStr())}</div></div>
         <button class="icon-btn" id="exitBtn">خروج</button>
       </div>
       <div class="grand-total"><span class="lbl">مجموع ${adminTab==='today'?'اليوم':'الكل'}</span><span class="val">${fmtDA(total)}</span></div>
+
+      <div class="card">
+        <h2>الحضور اليوم</h2>
+        ${employees.length===0 ? '<div class="empty">ماكاين حتى خدام</div>' :
+          employees.map(e=>{
+            const c = attendance.find(a=>a.employee===e.name && a.date===todayStr());
+            return c ? `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">${fmtTime(c.ts)}</span></div>`
+                      : `<div class="summary-row"><span class="name" style="color:var(--danger);">${e.name}</span><span class="count" style="color:var(--ink-soft);">مازال ما وصلش</span></div>`;
+          }).join('')}
+      </div>
+
       <div class="card">
         <div class="tabs">
           <div class="tab ${adminTab==='today'?'active':''}" id="tabToday">اليوم</div>
@@ -383,6 +482,20 @@ function render(){
         <h2>مجموع كل خدام (${adminTab==='today'?'اليوم':'الكل'})</h2>
         ${summary.map(([name,amt])=>`<div class="summary-row"><span class="name">${name}</span><span class="count">${fmtDA(amt)}</span></div>`).join('')}
       </div>`:''}
+
+      <div class="card">
+        <h2>مجموع ساعات إضافية (${adminTab==='today'?'اليوم':'الكل'}): ${fmtHrs(totalOT)}</h2>
+        ${otSummary.length===0 ? '<div class="empty">ماكاين حتى ساعات مسجلة</div>' :
+          otSummary.map(([name,hrs])=>`<div class="summary-row"><span class="name">${name}</span><span class="count">${fmtHrs(hrs)}</span></div>`).join('')}
+        <div style="margin-top:12px;">
+        ${filteredOT.length===0 ? '' :
+          filteredOT.map(o=>`
+            <div class="entry">
+              <div><div class="who">${o.employee}</div>${o.note?`<div class="what">${o.note}</div>`:''}</div>
+              <div class="meta"><span class="amount">${fmtHrs(o.hours)}</span><span class="time">${fmtTime(o.ts)}</span><button class="del" data-delot="${o.id}">حذف</button></div>
+            </div>`).join('')}
+        </div>
+      </div>
 
       <div class="card">
         <h2>شحال كلا كل خدام في كل يوم</h2>
@@ -438,6 +551,7 @@ function render(){
     document.getElementById('tabAll').addEventListener('click', ()=>{ adminTab='all'; render(); });
     document.querySelectorAll('[data-detail]').forEach(el=>el.addEventListener('click', ()=>{ detailEmployee = (detailEmployee===el.dataset.detail)?null:el.dataset.detail; render(); }));
     document.querySelectorAll('[data-del]').forEach(el=>el.addEventListener('click', ()=>deleteEntry(el.dataset.del)));
+    document.querySelectorAll('[data-delot]').forEach(el=>el.addEventListener('click', ()=>deleteOvertime(el.dataset.delot)));
     document.getElementById('addEmpBtn').addEventListener('click', addEmployeePrompt);
     document.querySelectorAll('[data-rm]').forEach(el=>el.addEventListener('click', ()=>removeEmployee(el.dataset.rm)));
     document.querySelectorAll('[data-pinchange]').forEach(el=>el.addEventListener('click', ()=>changeEmpPin(el.dataset.pinchange)));
@@ -489,6 +603,37 @@ function render(){
     const todayDay = daysList.find(d=>d.date===todayStr());
     const todayTotal = todayDay ? todayDay.total : 0;
     const allTotal = getEmpLogs(unlockedEmployee).reduce((s,l)=>s+Number(l.amount),0);
+    const todayCheckin = attendance.find(a=>a.employee===unlockedEmployee && a.date===todayStr());
+
+    const otDaysList = getEmpOTDaysList(unlockedEmployee);
+    const todayOTDay = otDaysList.find(d=>d.date===todayStr());
+    const todayOTTotal = todayOTDay ? todayOTDay.total : 0;
+    const allOTTotal = getEmpOT(unlockedEmployee).reduce((s,o)=>s+Number(o.hours),0);
+
+    function renderOTDayRows(){
+      if(otDaysList.length===0) return '<div class="empty">ماكاين حتى تسجيل بعد</div>';
+      return otDaysList.map(day=>{
+        const isToday = day.date===todayStr();
+        if(day.present){
+          const detailLines = day.entries.map(o=>`${fmtTime(o.ts)} — ${o.note||'بلا ملاحظة'} — <b>${fmtHrs(o.hours)}</b> <button class="del" data-delownot="${o.id}" style="font-size:11px;padding:2px 6px;">حذف</button>`).join('<br>');
+          return `<div class="day-row present">
+            <div>
+              <div class="day-label">${isToday?'<span class="day-today-badge">اليوم</span>':''}${fmtDateLabel(day.date)}</div>
+              <div class="day-sub">${detailLines}</div>
+            </div>
+            <span class="day-amount">${fmtHrs(day.total)}</span>
+          </div>`;
+        } else {
+          return `<div class="day-row absent">
+            <div>
+              <div class="day-label">${isToday?'<span class="day-today-badge">اليوم</span>':''}${fmtDateLabel(day.date)}</div>
+              <div class="day-sub">ما سجلش ساعات</div>
+            </div>
+            <span class="day-absent-badge">لا</span>
+          </div>`;
+        }
+      }).join('');
+    }
 
     function renderDayRows(){
       if(daysList.length===0) return '<div class="empty">ماكاين حتى تسجيل بعد</div>';
@@ -527,6 +672,15 @@ function render(){
         <div style="color:var(--green);font-weight:700;margin-top:4px;">${fmtDA(showConfirm.amount)}${showConfirm.note?' — '+showConfirm.note:''}</div>
       </div>`:''}
 
+      <div class="card" style="text-align:center;">
+        ${todayCheckin ? `
+          <div style="font-size:28px;margin-bottom:4px;">✅</div>
+          <div style="font-weight:900;color:var(--green-dark);font-size:15px;">وصلت اليوم فـ ${fmtTime(todayCheckin.ts)}</div>
+        ` : `
+          <button class="submit-btn" id="checkinBtn" style="background:var(--green);color:#fff;">📍 وصلت للمحل</button>
+        `}
+      </div>
+
       <div class="card">
         <label class="field-label">بشحال؟ (بالدينار)</label>
         <div class="amount-wrap"><input type="number" inputmode="numeric" id="amountInput" placeholder="0" value="${amount}"><span class="unit">دج</span></div>
@@ -554,14 +708,56 @@ function render(){
           <span class="day-total">مجموعي الكلي: ${fmtDA(allTotal)}</span>
         </div>
         ${renderDayRows()}
+      </div>
+
+      ${showOTConfirm?`<div class="card" style="background:var(--green-pale);border-color:var(--green);text-align:center;padding:16px;">
+        <div style="font-size:28px;margin-bottom:4px;">✅</div>
+        <div style="font-weight:900;color:var(--green-dark);font-size:15px;">تسجلت الساعات!</div>
+        <div style="color:var(--green);font-weight:700;margin-top:4px;">${fmtHrs(showOTConfirm.hours)}${showOTConfirm.note?' — '+showOTConfirm.note:''}</div>
+      </div>`:''}
+
+      <div class="card">
+        <label class="field-label">ساعات العمل الإضافية</label>
+        <div class="amount-wrap"><input type="number" step="0.5" inputmode="decimal" id="otHoursInput" placeholder="0" value="${otHours}"><span class="unit">س</span></div>
+        <label class="field-label">ملاحظة (اختياري)</label>
+        <input type="text" id="otNoteInput" placeholder="مثال: بقيت نرتب المحل" value="${otNote}">
+        <button class="submit-btn" id="otSubmitBtn" ${(!otHours || Number(otHours)<=0)?'disabled':''}>سجل الساعات</button>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h2 style="margin:0;">ساعات إضافية اليوم</h2>
+          <span class="day-total">مجموع اليوم: ${fmtHrs(todayOTTotal)}</span>
+        </div>
+        ${!todayOTDay || todayOTDay.entries.length===0 ? '<div class="empty">مازال ما سجلتيش ساعات اليوم</div>' :
+          todayOTDay.entries.map(o=>`
+            <div class="entry">
+              <div><div class="what">${o.note||'بلا ملاحظة'}</div></div>
+              <div class="meta"><span class="amount">${fmtHrs(o.hours)}</span><span class="time">${fmtTime(o.ts)}</span><button class="del" data-delownot="${o.id}">حذف</button></div>
+            </div>`).join('')}
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h2 style="margin:0;">السجل الكامل للساعات</h2>
+          <span class="day-total">مجموعي الكلي: ${fmtHrs(allOTTotal)}</span>
+        </div>
+        ${renderOTDayRows()}
       </div>`;
 
     document.getElementById('lockBtn').addEventListener('click', lockOut);
+    const checkinBtn = document.getElementById('checkinBtn');
+    if(checkinBtn) checkinBtn.addEventListener('click', checkIn);
     const amtEl = document.getElementById('amountInput');
     amtEl.addEventListener('input', e=>{ amount=e.target.value; const b=document.getElementById('submitBtn'); if(b) b.disabled = (!amount || Number(amount)<=0); });
     document.getElementById('noteInput').addEventListener('input', e=>{ note=e.target.value; });
     document.getElementById('submitBtn').addEventListener('click', submitEntry);
     document.querySelectorAll('[data-delown]').forEach(el=>el.addEventListener('click', ()=>deleteOwnEntry(el.dataset.delown)));
+    const otHoursEl = document.getElementById('otHoursInput');
+    otHoursEl.addEventListener('input', e=>{ otHours=e.target.value; const b=document.getElementById('otSubmitBtn'); if(b) b.disabled = (!otHours || Number(otHours)<=0); });
+    document.getElementById('otNoteInput').addEventListener('input', e=>{ otNote=e.target.value; });
+    document.getElementById('otSubmitBtn').addEventListener('click', submitOvertime);
+    document.querySelectorAll('[data-delownot]').forEach(el=>el.addEventListener('click', ()=>deleteOwnOvertime(el.dataset.delownot)));
     return;
   }
 }
