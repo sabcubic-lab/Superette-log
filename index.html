@@ -266,6 +266,7 @@ async function deleteOvertime(id){ await db.collection('overtime').doc(id).delet
 
 async function checkIn(){
   if(!unlockedEmployee) return;
+  if(attendance.find(a=>a.employee===unlockedEmployee && !a.checkOutTs)) return;
   const btn = document.getElementById('checkinBtn');
   if(btn){ btn.disabled=true; btn.textContent='...كايسجل'; }
   try{
@@ -278,8 +279,8 @@ async function checkIn(){
 }
 async function checkOut(){
   if(!unlockedEmployee) return;
-  const rec = attendance.find(a=>a.employee===unlockedEmployee && a.date===todayStr());
-  if(!rec || rec.checkOutTs) return;
+  const rec = attendance.find(a=>a.employee===unlockedEmployee && !a.checkOutTs);
+  if(!rec) return;
   if(!confirm('متأكد راك خرجت من المحل؟')) return;
   const btn = document.getElementById('checkoutBtn');
   if(btn){ btn.disabled=true; btn.textContent='...كايسجل'; }
@@ -495,12 +496,25 @@ function render(){
       <div class="grand-total"><span class="lbl">مجموع ${adminTab==='today'?'اليوم':'الكل'}</span><span class="val">${fmtDA(total)}</span></div>
 
       <div class="card">
-        <h2>الحضور اليوم</h2>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h2 style="margin:0;">الحضور اليوم</h2>
+          <span class="day-total">مجموع ساعات اليوم: ${fmtHrs((()=>{
+            let sum=0;
+            employees.forEach(e=>{
+              const open = attendance.find(a=>a.employee===e.name && !a.checkOutTs && a.date===todayStr());
+              if(open) sum += hoursBetween(open.ts, new Date().toISOString());
+              const c = attendance.find(a=>a.employee===e.name && a.date===todayStr() && a.checkOutTs);
+              if(c) sum += hoursBetween(c.ts, c.checkOutTs);
+            });
+            return sum.toFixed(1);
+          })())}</span>
+        </div>
         ${employees.length===0 ? '<div class="empty">ماكاين حتى خدام</div>' :
           employees.map(e=>{
-            const c = attendance.find(a=>a.employee===e.name && a.date===todayStr());
+            const open = attendance.find(a=>a.employee===e.name && !a.checkOutTs);
+            if(open) return `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">دخل ${open.date!==todayStr()?'البارح ':''}${fmtTime(open.ts)} (باقي يخدم)</span></div>`;
+            const c = attendance.find(a=>a.employee===e.name && a.date===todayStr() && a.checkOutTs);
             if(!c) return `<div class="summary-row"><span class="name" style="color:var(--danger);">${e.name}</span><span class="count" style="color:var(--ink-soft);">مازال ما وصلش</span></div>`;
-            if(!c.checkOutTs) return `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">دخل ${fmtTime(c.ts)}</span></div>`;
             return `<div class="summary-row"><span class="name">✅ ${e.name}</span><span class="count">${fmtTime(c.ts)} ← ${fmtTime(c.checkOutTs)} (${fmtHrs(hoursBetween(c.ts,c.checkOutTs).toFixed(1))})</span></div>`;
           }).join('')}
       </div>
@@ -676,7 +690,8 @@ function render(){
     const todayDay = daysList.find(d=>d.date===todayStr());
     const todayTotal = todayDay ? todayDay.total : 0;
     const allTotal = getEmpLogs(unlockedEmployee).reduce((s,l)=>s+Number(l.amount),0);
-    const todayCheckin = attendance.find(a=>a.employee===unlockedEmployee && a.date===todayStr());
+    const openSession = attendance.find(a=>a.employee===unlockedEmployee && !a.checkOutTs);
+    const todayCompleted = !openSession ? attendance.find(a=>a.employee===unlockedEmployee && a.date===todayStr() && a.checkOutTs) : null;
 
     const otDaysList = getEmpOTDaysList(unlockedEmployee);
     const todayOTDay = otDaysList.find(d=>d.date===todayStr());
@@ -746,16 +761,16 @@ function render(){
       </div>`:''}
 
       <div class="card" style="text-align:center;">
-        ${!todayCheckin ? `
-          <button class="submit-btn" id="checkinBtn" style="background:var(--green);color:#fff;">📍 وصلت للمحل</button>
-        ` : !todayCheckin.checkOutTs ? `
+        ${openSession ? `
           <div style="font-size:28px;margin-bottom:4px;">✅</div>
-          <div style="font-weight:900;color:var(--green-dark);font-size:15px;margin-bottom:12px;">وصلت اليوم فـ ${fmtTime(todayCheckin.ts)}</div>
+          <div style="font-weight:900;color:var(--green-dark);font-size:15px;margin-bottom:12px;">وصلت ${openSession.date!==todayStr()?'البارح ':''}فـ ${fmtTime(openSession.ts)}</div>
           <button class="submit-btn" id="checkoutBtn" style="background:var(--danger);color:#fff;">🚪 خرجت من المحل</button>
-        ` : `
+        ` : todayCompleted ? `
           <div style="font-size:28px;margin-bottom:4px;">✅</div>
-          <div style="font-weight:900;color:var(--green-dark);font-size:15px;">وصلت فـ ${fmtTime(todayCheckin.ts)} — خرجت فـ ${fmtTime(todayCheckin.checkOutTs)}</div>
-          <div style="color:var(--green);font-weight:700;margin-top:4px;">خدمت اليوم: ${fmtHrs(hoursBetween(todayCheckin.ts, todayCheckin.checkOutTs).toFixed(1))}</div>
+          <div style="font-weight:900;color:var(--green-dark);font-size:15px;">وصلت فـ ${fmtTime(todayCompleted.ts)} — خرجت فـ ${fmtTime(todayCompleted.checkOutTs)}</div>
+          <div style="color:var(--green);font-weight:700;margin-top:4px;">خدمت اليوم: ${fmtHrs(hoursBetween(todayCompleted.ts, todayCompleted.checkOutTs).toFixed(1))}</div>
+        ` : `
+          <button class="submit-btn" id="checkinBtn" style="background:var(--green);color:#fff;">📍 وصلت للمحل</button>
         `}
       </div>
 
